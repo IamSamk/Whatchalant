@@ -179,7 +179,7 @@ async function command(c) {
   refresh();
 }
 $('cmdForm').onsubmit = (e) => { e.preventDefault(); const c = $('cmd').value.trim(); if (c) command(c); $('cmd').value=''; };
-let lastQr = null, editing = new Set(), numFilled = false;
+let lastQr = null, editing = new Set(), numFilled = false, lastDrafts = [];
 $('pairForm').onsubmit = (e) => { e.preventDefault(); const n = $('pairNum').value.replace(/\\D/g,''); command(':pair ' + n); };
 async function refresh() {
   let s; try { s = await (await fetch('/api/state')).json(); } catch { $('conn').textContent = 'App not running'; $('dot').className='dot bad'; return; }
@@ -202,6 +202,7 @@ async function refresh() {
   $('toggles').querySelectorAll('button').forEach(b => b.onclick = () => command(':toggle ' + b.dataset.t));
   $('llm').textContent = 'LLM: ' + s.llm.provider + ' / ' + s.llm.model + (s.llm.baseUrl ? ' @ ' + s.llm.baseUrl : '');
   $('queue').textContent = 'Queue: ' + s.queue + ' pending · Whitelist: ' + (s.whitelist.length ? s.whitelist.length + ' entries' : 'none');
+  lastDrafts = s.drafts;
   if (!editing.size) {
     $('drafts').innerHTML = s.drafts.length ? s.drafts.map(d =>
       '<div class="draft"><div class="muted">#'+d.id+' → '+esc(d.label)+'</div>' +
@@ -214,7 +215,8 @@ async function refresh() {
       const id = b.dataset.id; editing.delete(id);
       if (b.dataset.a === 'reject') return command(':reject ' + id);
       const text = $('drafts').querySelector('textarea[data-id="'+id+'"]').value.replace(/\\s+/g,' ').trim();
-      command(':edit ' + id + ' ' + text);
+      const orig = (lastDrafts.find(d => String(d.id) === id) || {}).text;
+      command(text === orig ? ':approve ' + id : ':edit ' + id + ' ' + text);
     });
   }
   $('chats').innerHTML = s.chats.length ? s.chats.map(c => '<li>'+(c.isGroup?'👥 ':'👤 ')+esc(c.name)+' <span class="muted">'+esc(c.jid)+'</span></li>').join('') : '<li class="muted">No chats yet.</li>';
