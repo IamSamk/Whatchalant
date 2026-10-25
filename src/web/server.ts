@@ -14,7 +14,10 @@ async function snapshot() {
   return {
     connection: state.connection,
     me: state.me ? { name: state.me.name, number: jidUser(state.me.id) } : null,
-    qrSvg: state.qr ? await QRCode.toString(state.qr, { type: 'svg', margin: 1, width: 280 }) : null,
+    // Low error correction = fewer, bigger squares; 4-module white border; drawn pixel-exact as a PNG.
+    qrPng: state.qr ? await QRCode.toDataURL(state.qr, { errorCorrectionLevel: 'L', margin: 4, scale: 10 }) : null,
+    pairingCode: state.pairingCode,
+    myNumber: config.MY_PHONE_NUMBER,
     toggles: { voice: state.voiceAlerts, ai: state.aiAutoReply, draft: state.draftMode, selftest: state.selfChatTest },
     llm: { provider: state.provider, model: state.model, baseUrl: state.provider === 'custom' ? state.customBaseUrl : null },
     queue: dispatcher.pending,
@@ -104,7 +107,9 @@ const PAGE = /* html */ `<!doctype html>
   .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; border:1px solid var(--line); font-size:13px; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--warn); }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
-  #qr svg { width:100%; max-width:280px; height:auto; background:#fff; border-radius:8px; display:block; }
+  #qrImg { width:min(100%, 420px); height:auto; image-rendering:pixelated; background:#fff; border-radius:6px; display:block; margin:0 auto; }
+  #qrCard { grid-column:1/-1; }
+  .code { font:600 34px/1.2 ui-monospace,Consolas,monospace; letter-spacing:.12em; padding:10px 14px; border:1px dashed var(--line); border-radius:10px; display:inline-block; }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer; }
   button:hover { border-color:var(--mute); }
@@ -130,6 +135,11 @@ const PAGE = /* html */ `<!doctype html>
   <section class="card" id="qrCard">
     <h2>Link device</h2>
     <div id="qrBox"><p class="muted">Waiting for WhatsApp…</p></div>
+    <div id="pairBox" style="margin-top:14px; display:none">
+      <p class="muted" style="margin:0 0 8px">QR won't scan? Link with a code instead:</p>
+      <form id="pairForm" class="row" style="flex-wrap:nowrap"><input id="pairNum" placeholder="Your number with country code, e.g. 919876543210" inputmode="numeric"><button>Get code</button></form>
+      <div id="pairCode" style="margin-top:10px"></div>
+    </div>
   </section>
   <section class="card">
     <h2>Switches</h2>
@@ -169,18 +179,23 @@ async function command(c) {
   refresh();
 }
 $('cmdForm').onsubmit = (e) => { e.preventDefault(); const c = $('cmd').value.trim(); if (c) command(c); $('cmd').value=''; };
-let lastQr = null, editing = new Set();
+let lastQr = null, editing = new Set(), numFilled = false;
+$('pairForm').onsubmit = (e) => { e.preventDefault(); const n = $('pairNum').value.replace(/\\D/g,''); command(':pair ' + n); };
 async function refresh() {
   let s; try { s = await (await fetch('/api/state')).json(); } catch { $('conn').textContent = 'App not running'; $('dot').className='dot bad'; return; }
   $('conn').textContent = s.connection;
   $('dot').className = 'dot ' + (s.connection === 'Connected' ? 'ok' : s.connection === 'Logged Out' ? 'bad' : '');
   $('me').textContent = s.me ? (s.me.name || '') + ' · +' + s.me.number : '';
-  if (s.qrSvg && s.qrSvg !== lastQr) {
-    $('qrBox').innerHTML = s.qrSvg + '<p class="muted">WhatsApp on your phone → Settings → Linked devices → Link a device. The code refreshes every ~20s.</p>';
-  } else if (!s.qrSvg) {
+  if (s.qrPng && s.qrPng !== lastQr) {
+    $('qrBox').innerHTML = '<img id="qrImg" alt="WhatsApp QR code" src="' + s.qrPng + '"><p class="muted" style="text-align:center">WhatsApp on your phone → Settings → Linked devices → Link a device. Refreshes every ~20s.</p>';
+  } else if (!s.qrPng) {
     $('qrBox').innerHTML = s.connection === 'Connected' ? '<p>✅ Linked. You can close this tab; the assistant keeps running.</p>' : '<p class="muted">Waiting for WhatsApp… (' + esc(s.connection) + ')</p>';
   }
-  lastQr = s.qrSvg;
+  lastQr = s.qrPng;
+  const linking = s.connection !== 'Connected';
+  $('pairBox').style.display = linking ? 'block' : 'none';
+  if (!numFilled && s.myNumber) { $('pairNum').value = s.myNumber; numFilled = true; }
+  $('pairCode').innerHTML = s.pairingCode && linking ? '<div class="code">' + esc(s.pairingCode) + '</div><p class="muted">Phone: Linked devices → Link a device → <b>Link with phone number instead</b> → type this code.</p>' : '';
   const t = s.toggles;
   $('toggles').innerHTML = [['ai','AI auto-reply'],['draft','Draft mode'],['voice','Voice alerts'],['selftest','Self-chat test']]
     .map(([k,l]) => '<button class="'+(t[k]?'on':'')+'" data-t="'+k+'">'+l+': '+(t[k]?'ON':'OFF')+'</button>').join('');

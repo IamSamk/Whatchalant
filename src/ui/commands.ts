@@ -1,8 +1,9 @@
-import { jidUser, state } from '../config.js';
+import { config, jidUser, state } from '../config.js';
 import { recentChats } from '../core/assistant.js';
 import { drafts } from '../core/drafts.js';
 import { dispatcher } from '../core/queue.js';
 import { getSocket, toJid } from '../core/socket.js';
+import { requestPairingCode } from '../core/whatsapp.js';
 import { connectCustom, fetchAvailableModels, selectModel, setProvider, type ModelInfo } from '../services/llm.js';
 import { cancelJob, listJobs, parseWhen, scheduleMessage, scheduleOnce } from '../services/scheduler.js';
 import { dictate } from '../services/stt.js';
@@ -13,6 +14,7 @@ let lastModelList: ModelInfo[] = [];
 export const HELP = `
 Commands
   :status                          dashboard
+  :pair [number]                   link with an 8-character code instead of the QR
   :models                          list models for the current provider (numbered)
   :model <n|name|path.gguf>        pick a model (number from :models works)
   :provider ollama|lmstudio|custom switch provider
@@ -93,6 +95,13 @@ export async function runCommand(input: string): Promise<string> {
     case 's':
       return statusText();
 
+    case 'pair': {
+      const num = args[0] ?? config.MY_PHONE_NUMBER;
+      if (!num) return 'usage: :pair <your number with country code>';
+      const code = await requestPairingCode(num);
+      return `pairing code: ${code}
+On your phone: WhatsApp → Settings → Linked devices → Link a device → "Link with phone number instead" → enter the code.`;
+    }
     case 'models': {
       lastModelList = await fetchAvailableModels();
       if (!lastModelList.length)

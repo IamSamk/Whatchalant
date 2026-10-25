@@ -15,7 +15,7 @@ import qrcode from 'qrcode-terminal';
 import { config, state } from '../config.js';
 import { handleIncoming } from './assistant.js';
 import { errMsg, log } from './log.js';
-import { setSocket } from './socket.js';
+import { getRawSocket, setSocket } from './socket.js';
 
 // Baileys is chatty; keep its own logs quiet unless debugging.
 const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL ?? 'silent' });
@@ -52,10 +52,12 @@ export async function startWhatsApp(): Promise<WASocket> {
   });
 
   sock.ev.on('creds.update', saveCreds);
+  setSocket(sock);
 
   sock.ev.on('connection.update', async (u) => {
     if (u.qr) {
       state.qr = u.qr;
+      if (state.connection !== 'QR Required') state.pairingCode = null;
       state.connection = 'QR Required';
       state.changed();
       log.event(`[wa] scan the QR code to link this device → http://localhost:${config.DASHBOARD_PORT}`);
@@ -65,6 +67,7 @@ export async function startWhatsApp(): Promise<WASocket> {
     if (u.connection === 'open') {
       attempt = 0;
       state.qr = null;
+      state.pairingCode = null;
       state.connection = 'Connected';
       state.me = sock.user ? { id: sock.user.id, lid: sock.user.lid, name: sock.user.name ?? sock.user.notify } : null;
       setSocket(sock);
@@ -73,7 +76,7 @@ export async function startWhatsApp(): Promise<WASocket> {
     }
 
     if (u.connection === 'close') {
-      setSocket(null);
+      if (getRawSocket() === sock) setSocket(null);
       const code = (u.lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
       const reason = u.lastDisconnect?.error ? errMsg(u.lastDisconnect.error) : 'unknown';
 
@@ -88,8 +91,10 @@ export async function startWhatsApp(): Promise<WASocket> {
         scheduleReconnect(1000);
         return;
       }
-      const delay = code === DisconnectReason.restartRequired ? 0 : Math.min(30_000, 2000 * 2 ** attempt);
-      attempt++;
+      // 515 = restart after pairing; 408 = QR codes ran out unscanned → just show fresh ones.
+      const quick = code === DisconnectReason.restartRequired || code === DisconnectReason.timedOut;
+      const delay = quick ? 1000 : Math.min(30_000, 2000 * 2 ** attempt);
+      if (!quick) attempt++;
       state.connection = 'Reconnecting';
       state.changed();
       log.warn(`[wa] connection closed (${code ?? '?'}: ${reason}), reconnecting in ${Math.round(delay / 1000)}s`);
@@ -111,6 +116,24 @@ export async function startWhatsApp(): Promise<WASocket> {
   });
 
   return sock;
+}
+
+/**
+ * Alternative to the QR: WhatsApp → Linked devices → Link a device → "Link with phone number instead",
+ * then type the 8-character code this returns.
+ */
+export async function requestPairingCode(phone: string): Promise<string> {
+  const sock = getRawSocket();
+  const digits = phone.replace(/\D/g, '');
+  if (!sock) throw new Error('WhatsApp socket not started yet, try again in a few seconds');
+  if (state.connection === 'Connected') throw new Error('already linked');
+  if (digits.length < 8) throw new Error('give the full number with country code, e.g. 919876543210');
+  const raw = await sock.requestPairingCode(digits);
+  const code = raw.match(/.{1,4}/g)?.join('-') ?? raw;
+  state.pairingCode = code;
+  state.changed();
+  log.event(`[wa] pairing code for +${digits}: ${code}  (WhatsApp → Linked devices → Link with phone number instead)`);
+  return code;
 }
 
 function scheduleReconnect(ms: number) {

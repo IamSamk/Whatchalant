@@ -13,6 +13,11 @@ export function getSocket(): WASocket {
   return current;
 }
 
+/** Socket even before pairing (needed to request a pairing code). */
+export function getRawSocket(): WASocket | null {
+  return current;
+}
+
 export function isConnected() {
   return current !== null && state.connection === 'Connected';
 }

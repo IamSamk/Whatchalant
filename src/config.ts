@@ -100,6 +100,7 @@ export type ConnectionStatus = 'Starting' | 'QR Required' | 'Connecting' | 'Conn
 class RuntimeState extends EventEmitter {
   connection: ConnectionStatus = 'Starting';
   qr: string | null = null;
+  pairingCode: string | null = null;
   me: { id: string; lid?: string; name?: string } | null = null;
 
   voiceAlerts = config.VOICE_ALERTS_ENABLED;
