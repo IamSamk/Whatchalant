@@ -7,6 +7,8 @@ A local-first personal WhatsApp assistant that runs on your own computer as a li
 - **Draft & Approve:** replies wait for your OK in the terminal, on the localhost dashboard, or in your "Message yourself" chat.
 - **Voice:** incoming voice notes are transcribed, and `:dictate` turns your mic recording into a draft. Both use local Whisper.
 - **Scheduler:** recurring messages on a cron schedule, plus one-off messages at a set time (`:at`). Jobs survive restarts.
+- **Catch me up 🦥:** your local model summarises everything people sent while you were away, and puts the chats that need you first. It can also send you a daily digest in "Message yourself" every morning.
+- **Health check and fix-it hints:** checks LLM, Whisper, ffmpeg, voice and WhatsApp at startup. Every error comes with a one-line fix.
 
 ## Setup
 
@@ -16,7 +18,7 @@ cp .env.example .env   # then edit it
 npm run dev
 ```
 
-Open http://localhost:3000 and link the device. On your phone, go to WhatsApp → Settings → Linked devices → Link a device and scan the QR. If the camera won't scan it, click **Get code** on the page and use "Link with phone number instead". Your login is saved in `auth_info_baileys/`.
+Open http://localhost:3000. The dashboard covers every feature (linking, switches, models, catch-up, drafts, sending, dictation, scheduling, whitelist, health check), so no commands are needed. To link the device: On your phone, go to WhatsApp → Settings → Linked devices → Link a device and scan the QR. If the camera won't scan it, click **Get code** on the page and use "Link with phone number instead". Your login is saved in `auth_info_baileys/`.
 
 Requires Node 20+. Dictation needs `ffmpeg`. Transcription needs either a whisper.cpp server (`WHISPER_ENDPOINT`) or the `whisper` CLI (`pip install openai-whisper`).
 
@@ -44,12 +46,34 @@ AI replies are off unless `AI_AUTOREPLY_ENABLED=true` or you run `:toggle ai`. W
 
 **Testing with one phone:** set `SELF_CHAT_TEST=true`. Messages you send in "Message yourself" are then treated as incoming, and replies come back there starting with 🤖. Lines starting with `:` in that chat run commands (`:status`, `:toggle draft` …).
 
+## Troubleshooting
+
+The dashboard's **Health check** panel and `:doctor` find these automatically and show the fix.
+
+| Symptom | Fix |
+|---|---|
+| QR won't scan | Use **Get code** under the QR, then "Link with phone number instead" on your phone. |
+| Messages arrive but nothing happens; log shows "No session record" | Requires Baileys 7 (already used here). If it persists, delete `auth_info_baileys/` and link again. |
+| `Ollama isn't running` / `ECONNREFUSED` | Start Ollama or LM Studio's server, or pick a `.gguf` in the Model panel and the app launches `llama-server` itself. |
+| `Ollama doesn't have "<model>"` | `ollama pull <model>`, or pick an installed model in the Model panel. |
+| Model fails to load (out of memory) | Use a smaller quantisation, or lower `-ngl` / `-c` in `LLAMA_SERVER_ARGS`. |
+| ElevenLabs 401 / 402 / 404 | Wrong key / quota used up / wrong `ELEVENLABS_VOICE_ID`. The system voice is used as a fallback meanwhile. |
+| Whisper not found | `pip install openai-whisper`, or run a whisper.cpp server and set `WHISPER_ENDPOINT`. |
+| Dictation: no microphone | Set `MIC_DEVICE`. To list devices: `ffmpeg -list_devices true -f dshow -i dummy`. On Windows, allow desktop apps to use the mic. |
+| `Port 3000 is already in use` | The app is already running, or set `DASHBOARD_PORT`. |
+| Disconnect 440 | The app is running twice; close one. |
+| Disconnect 500 | Corrupt session: delete `auth_info_baileys/` and link again. |
+| Disconnect 401 | Unlinked from the phone; a fresh QR appears automatically. |
+
+Set `WA_DEBUG=true` to log the type of every incoming message.
+
 ## Commands
 
 Type these in the terminal, the dashboard's command box, or your self-chat:
 
 ```
-:status  :models  :model <n|name|path>  :provider <name>  :connect <url|gguf|folder>
+:status  :doctor  :catchup [send]  :digest <HH:MM>
+:models  :model <n|name|path>  :provider <name>  :connect <url|gguf|folder>
 :toggle ai|voice|draft|selftest   :drafts  y / n  :approve <id>  :reject <id>  :edit <id> <text>
 :send <number> <text>   :dictate <number> [secs]   :pair [number]
 :schedule <number> "<cron>" <message>   :at <number> <+10m|18:30|ISO> <message>   :jobs  :cancel <id>
