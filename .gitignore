@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+auth_info_baileys/
+temp/
+data/
+*.log
+.claude/
