@@ -14,6 +14,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { config, state } from '../config.js';
 import { handleIncoming } from './assistant.js';
+import { hintFor } from './hints.js';
 import { errMsg, log } from './log.js';
 import { getRawSocket, setSocket } from './socket.js';
 
@@ -97,7 +98,9 @@ export async function startWhatsApp(): Promise<WASocket> {
       if (!quick) attempt++;
       state.connection = 'Reconnecting';
       state.changed();
-      log.warn(`[wa] connection closed (${code ?? '?'}: ${reason}), reconnecting in ${Math.round(delay / 1000)}s`);
+      const hint = hintFor('whatsapp', u.lastDisconnect?.error);
+      log.warn(`[wa] connection closed (${code ?? '?'}: ${reason}), reconnecting in ${Math.round(delay / 1000)}s${hint ? `
+   → ${hint}` : ''}`);
       scheduleReconnect(delay);
     }
   });

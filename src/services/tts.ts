@@ -6,6 +6,7 @@ import PQueue from 'p-queue';
 import sound from 'sound-play';
 import { config, state } from '../config.js';
 import { errMsg, log } from '../core/log.js';
+import { explain } from '../core/hints.js';
 
 const MAX_TEXT = 120;
 // Alerts are spoken one at a time so overlapping mentions don't talk over each other.
@@ -95,8 +96,7 @@ export function speakTagAlert(senderName: string, text: string, groupName?: stri
         log.warn('[tts] voice alert skipped: ELEVENLABS_API_KEY not set');
       }
     } catch (e) {
-      const status = axios.isAxiosError(e) ? ` (HTTP ${e.response?.status ?? 'n/a'})` : '';
-      log.error(`[tts] voice alert failed${status}: ${errMsg(e)}`);
+      log.error(explain('tts', e, '[tts] voice alert failed: '));
       if (config.ELEVENLABS_API_KEY && config.VOICE_SYSTEM_FALLBACK) await systemSpeak(phrase).catch(() => undefined);
     }
   });

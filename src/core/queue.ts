@@ -1,6 +1,7 @@
 import PQueue from 'p-queue';
 import { generateMessageID, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { log, errMsg } from './log.js';
+import { explain } from './hints.js';
 
 /** Ids of messages this app sent, so its own messages are never mistaken for the user's (or answered). */
 export const botSentIds = new Set<string>();
@@ -80,7 +81,7 @@ class AntiBanDispatcher {
         opts.onSent?.(sent);
         return sent;
       } catch (e) {
-        log.error(`[queue] failed to send to ${label}: ${errMsg(e)}`);
+        log.error(explain('whatsapp', e, `[queue] failed to send to ${label}: `));
         throw e;
       } finally {
         // 5. Stop typing and cool down before the next dispatch.

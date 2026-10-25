@@ -1,7 +1,7 @@
 import readline from 'node:readline';
 import { state } from '../config.js';
-import { errMsg, setLogWriter } from '../core/log.js';
-import { runCommand, statusText } from './commands.js';
+import { setLogWriter } from '../core/log.js';
+import { runCommandSafe, statusText } from './commands.js';
 
 /** Interactive console. Log lines print above the prompt without clobbering what you're typing. */
 export function startCli() {
@@ -23,12 +23,8 @@ export function startCli() {
 
   rl.on('line', async (line) => {
     if (line.trim()) {
-      try {
-        const out = await runCommand(line);
-        if (out) console.log(out);
-      } catch (e) {
-        console.log(`\x1b[31merror:\x1b[0m ${errMsg(e)}`);
-      }
+      const out = await runCommandSafe(line);
+      if (out) console.log(out.startsWith('error:') ? `\x1b[31m${out}\x1b[0m` : out);
     }
     rl.prompt();
   });

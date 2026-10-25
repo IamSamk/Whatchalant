@@ -31,6 +31,7 @@ export function toJid(input: string): string {
   }
   if (s.includes('@')) return s;
   const digits = s.replace(/\D/g, '');
-  if (digits.length < 7) throw new Error(`not a phone number or JID: ${input}`);
+  if (digits.length < 7)
+    throw new Error(`"${input}" is not a phone number. Use the full number with country code and no "+", e.g. 919876543210, or pick a recent chat.`);
   return `${digits}@s.whatsapp.net`;
 }
