@@ -1,6 +1,9 @@
 import PQueue from 'p-queue';
-import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
+import { generateMessageID, type WAMessage, type WASocket } from '@whiskeysockets/baileys';
 import { log, errMsg } from './log.js';
+
+/** Ids of messages this app sent, so its own messages are never mistaken for the user's (or answered). */
+export const botSentIds = new Set<string>();
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rand = (min: number, max: number) => Math.floor(min + Math.random() * (max - min + 1));
@@ -66,8 +69,11 @@ class AntiBanDispatcher {
         await sleep(plan.typingMs);
 
         // 4. Send.
-        const quote = opts.replyTo && opts.quote !== false ? { quoted: opts.replyTo } : undefined;
-        const sent = await sock.sendMessage(jid, { text }, quote);
+        const messageId = generateMessageID();
+        botSentIds.add(messageId);
+        if (botSentIds.size > 2000) botSentIds.delete(botSentIds.values().next().value as string);
+        const quoted = opts.replyTo && opts.quote !== false ? opts.replyTo : undefined;
+        const sent = await sock.sendMessage(jid, { text }, { quoted, messageId });
         log.event(
           `[queue] sent to ${label} (read ${(plan.readDelayMs / 1000).toFixed(1)}s, typed ${(plan.typingMs / 1000).toFixed(1)}s)`,
         );
