@@ -105,6 +105,10 @@ export async function startWhatsApp(): Promise<WASocket> {
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
       if (msg.key.fromMe) rememberSent(msg.key, msg.message);
+      if (process.env.WA_DEBUG) {
+        const kind = msg.message ? Object.keys(msg.message).join(',') : `no content (stub ${msg.messageStubType ?? '-'} ${msg.messageStubParameters?.join(' ') ?? ''})`;
+        log.info(`[debug] upsert ${type} chat=${msg.key.remoteJid} fromMe=${msg.key.fromMe} → ${kind}`);
+      }
       // 'notify' = new live messages; 'append' = history sync, which we never answer.
       if (type !== 'notify') continue;
       try {

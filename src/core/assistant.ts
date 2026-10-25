@@ -84,7 +84,8 @@ export function isSelfChat(jid: string) {
 /** Every identifier the sender might be known by (phone number and/or LID). */
 function senderIds(msg: WAMessage): string[] {
   const k = msg.key;
-  return [k.remoteJid, k.participant, k.participantPn, k.senderPn, k.senderLid, k.participantLid]
+  // Baileys 7: *Alt holds the other address form (phone number ↔ LID) of the same person.
+  return [k.remoteJid, k.remoteJidAlt, k.participant, k.participantAlt]
     .filter((x): x is string => typeof x === 'string' && x.length > 0)
     .map(jidUser);
 }
