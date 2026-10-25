@@ -97,13 +97,22 @@ export async function fetchAvailableModels(provider: Provider = state.provider):
     if (provider === 'lmstudio') throw e;
   }
 
-  // Custom: also offer the .gguf files from CUSTOM_MODEL_PATH so they can be launched with llama-server.
+  // Custom: also offer the .gguf files next to / inside CUSTOM_MODEL_PATH so they can be launched with llama-server.
   if (provider === 'custom' && config.CUSTOM_MODEL_PATH) {
     const target = config.CUSTOM_MODEL_PATH;
-    const files = /\.gguf$/i.test(target) ? [target] : await scanGguf(target);
+    const files = await scanGguf(/\.gguf$/i.test(target) ? path.dirname(target) : target);
+    if (/\.gguf$/i.test(target) && existsSync(target)) files.unshift(target);
     models.push(...(await ggufInfos(files)));
   }
-  return models;
+  // The running model can appear both as "served" and as its file: keep one entry per file.
+  const norm = (id: string) => (/\.gguf$/i.test(id) ? path.basename(id, path.extname(id)) : id).toLowerCase();
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    const k = norm(m.id);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 // ── llama-server lifecycle for raw .gguf files ─────────────────────────
@@ -259,19 +268,17 @@ function buildMessages(senderText: string, chatHistorySummary?: string, history:
   ];
 }
 
-export async function generateReply(
-  senderText: string,
-  chatHistorySummary?: string,
-  history: ChatTurn[] = [],
-): Promise<string> {
-  const messages = buildMessages(senderText, chatHistorySummary, history);
+type Msg = { role: 'system' | 'user' | 'assistant'; content: string };
+
+/** One chat completion against the active provider. Errors keep their HTTP status / code for hints. */
+async function chat(messages: Msg[], maxTokens: number, temperature: number): Promise<string> {
   const provider = state.provider;
   let raw: string;
   try {
     if (provider === 'ollama') {
       const { data } = await axios.post<{ message: { content: string } }>(
         `${config.OLLAMA_BASE_URL}/api/chat`,
-        { model: state.model, messages, stream: false, options: { temperature: 0.7, num_predict: 160 } },
+        { model: state.model, messages, stream: false, options: { temperature, num_predict: maxTokens } },
         { timeout: 120_000 },
       );
       raw = data.message.content;
@@ -281,8 +288,8 @@ export async function generateReply(
         {
           model: state.model,
           messages,
-          temperature: 0.7,
-          max_tokens: 160,
+          temperature,
+          max_tokens: maxTokens,
           stream: false,
           // llama.cpp: turn off "thinking" for hybrid reasoning models (servers that don't know it ignore it).
           ...(provider === 'custom' ? { chat_template_kwargs: { enable_thinking: false } } : {}),
@@ -293,9 +300,42 @@ export async function generateReply(
     }
   } catch (e) {
     const detail = axios.isAxiosError(e) ? JSON.stringify(e.response?.data ?? e.code ?? e.message) : errMsg(e);
-    throw new Error(`${provider} request failed: ${detail}`);
+    const wrapped = new Error(`${provider} request failed: ${detail}`) as Error & { code?: string; response?: unknown };
+    if (axios.isAxiosError(e)) {
+      wrapped.code = e.code;
+      wrapped.response = { status: e.response?.status, data: e.response?.data };
+    }
+    throw wrapped;
   }
-  const reply = cleanReply(raw);
-  if (!reply) throw new Error('model returned an empty reply');
-  return reply;
+  const out = cleanReply(raw);
+  if (!out) throw new Error('model returned an empty reply');
+  return out;
+}
+
+export async function generateReply(
+  senderText: string,
+  chatHistorySummary?: string,
+  history: ChatTurn[] = [],
+): Promise<string> {
+  return chat(buildMessages(senderText, chatHistorySummary, history), 160, 0.7);
+}
+
+const SUMMARY_PROMPT = [
+  'You summarise WhatsApp chats for a busy person who did not read them.',
+  'For each chat give one short line (two at most): what happened, decided or asked.',
+  'Start the line with the chat name in bold, like **Weekend Plans**:.',
+  'Put chats that need the person to act or answer first and end those lines with "→ needs you".',
+  'Skip small talk. No intro, no outro, plain text with the bold chat names only.',
+].join(' ');
+
+/** Summarise a transcript of several chats into a few lines. */
+export async function summarizeChats(transcript: string): Promise<string> {
+  return chat(
+    [
+      { role: 'system', content: SUMMARY_PROMPT },
+      { role: 'user', content: transcript },
+    ],
+    400,
+    0.3,
+  );
 }

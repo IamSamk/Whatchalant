@@ -1,11 +1,13 @@
 import { config, jidUser, state } from '../config.js';
-import { recentChats } from '../core/assistant.js';
+import { catchUp, recentChats } from '../core/assistant.js';
+import { formatChecks, runDoctor } from '../core/doctor.js';
+import { explain, type FailureArea } from '../core/hints.js';
 import { drafts } from '../core/drafts.js';
 import { dispatcher } from '../core/queue.js';
 import { getSocket, toJid } from '../core/socket.js';
 import { requestPairingCode } from '../core/whatsapp.js';
 import { connectCustom, fetchAvailableModels, selectModel, setProvider, type ModelInfo } from '../services/llm.js';
-import { cancelJob, listJobs, parseWhen, scheduleMessage, scheduleOnce } from '../services/scheduler.js';
+import { cancelJob, listJobs, parseWhen, scheduleDigest, scheduleMessage, scheduleOnce } from '../services/scheduler.js';
 import { dictate } from '../services/stt.js';
 
 const on = (b: boolean) => (b ? '\x1b[32mON\x1b[0m' : '\x1b[31mOFF\x1b[0m');
@@ -14,6 +16,9 @@ let lastModelList: ModelInfo[] = [];
 export const HELP = `
 Commands
   :status                          dashboard
+  :doctor                          check LLM, Whisper, ffmpeg, voice, WhatsApp and how to fix problems
+  :catchup [send]                  summarise what you missed (send = also post it to your own chat)
+  :digest <HH:MM | "<cron>">        daily catch-up summary sent to your own chat, e.g. :digest 08:00
   :pair [number]                   link with an 8-character code instead of the QR
   :models                          list models for the current provider (numbered)
   :model <n|name|path.gguf>        pick a model (number from :models works)
@@ -95,6 +100,27 @@ export async function runCommand(input: string): Promise<string> {
     case 's':
       return statusText();
 
+    case 'doctor':
+      return formatChecks(await runDoctor());
+    case 'catchup':
+    case 'catch-up': {
+      const r = await catchUp();
+      if (args[0] === 'send' && r.chatCount) {
+        void dispatcher
+          .enqueue(getSocket(), toJid('me'), `🦥 Catch-up (${r.messageCount} messages, ${r.chatCount} chats):\n\n${r.summary}`, {
+            label: 'Message yourself',
+          })
+          .catch(() => undefined);
+      }
+      return r.chatCount ? `${r.messageCount} new message(s) in ${r.chatCount} chat(s):\n${r.summary}` : r.summary;
+    }
+    case 'digest': {
+      if (!rest) return 'usage: :digest 08:00   or   :digest "0 8 * * *"';
+      const hm = rest.match(/^(\d{1,2}):(\d{2})$/);
+      const expr = hm ? `${Number(hm[2])} ${Number(hm[1])} * * *` : rest.replace(/^"(.*)"$/, '$1');
+      const job = scheduleDigest(toJid('me'), expr);
+      return `job #${job.id}: catch-up digest on "${expr}" → your "Message yourself" chat`;
+    }
     case 'pair': {
       const num = args[0] ?? config.MY_PHONE_NUMBER;
       if (!num) return 'usage: :pair <your number with country code>';
@@ -226,5 +252,25 @@ On your phone: WhatsApp → Settings → Linked devices → Link a device → "L
       return 'bye';
     default:
       return `unknown command :${cmd} (try :help)`;
+  }
+}
+
+/** Which subsystem a command touches, so failures get the right fix-it hint. */
+function areaFor(line: string): FailureArea {
+  const cmd = line.trim().slice(1).split(/\s+/)[0]?.toLowerCase() ?? '';
+  if (['models', 'model', 'provider', 'connect', 'catchup', 'catch-up'].includes(cmd)) return 'llm';
+  if (cmd === 'dictate') return /transcri/i.test(line) ? 'stt' : 'mic';
+  if (['schedule', 'at', 'digest'].includes(cmd)) return 'scheduler';
+  return 'whatsapp';
+}
+
+/** runCommand that never throws: errors come back as "error: … → how to fix". */
+export async function runCommandSafe(line: string): Promise<string> {
+  try {
+    return await runCommand(line);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const area: FailureArea = /transcription failed/i.test(msg) ? 'stt' : areaFor(line);
+    return explain(area, e, 'error: ');
   }
 }

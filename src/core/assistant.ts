@@ -10,17 +10,20 @@ import {
   type WASocket,
 } from '@whiskeysockets/baileys';
 import { config, jidUser, state } from '../config.js';
-import { generateReply, type ChatTurn } from '../services/llm.js';
+import { generateReply, summarizeChats, type ChatTurn } from '../services/llm.js';
 import { transcribeVoiceNote } from '../services/stt.js';
 import { speakTagAlert } from '../services/tts.js';
 import { drafts } from './drafts.js';
+import { explain } from './hints.js';
 import { errMsg, log } from './log.js';
 import { botSentIds, dispatcher } from './queue.js';
 
 // ── Tunables ───────────────────────────────────────────────────────────
 const DEBOUNCE_MS = 3500; // gather bursts of messages into one reply
 const MAX_AGE_MS = 90_000; // never answer backlog delivered after being offline
-const HISTORY_LEN = 12;
+const HISTORY_LEN = 12; // turns of context given to the model
+const ARCHIVE_LEN = 200; // messages kept per chat for "Catch me up"
+const CATCHUP_MAX_CHARS = 9000; // keep the summary prompt inside a 4k-token context
 const MANUAL_TAKEOVER_MS = 10 * 60_000; // you typed in this chat recently → stay quiet
 const PER_CHAT_LIMIT = { max: 4, windowMs: 10 * 60_000 };
 const GLOBAL_LIMIT = { max: 20, windowMs: 60 * 60_000 };
@@ -32,6 +35,7 @@ interface HistoryItem {
   name: string;
   text: string;
   ts: number;
+  mentionedMe?: boolean;
 }
 export interface ChatSummary {
   jid: string;
@@ -42,6 +46,9 @@ export interface ChatSummary {
 }
 
 const history = new Map<string, HistoryItem[]>();
+const archive = new Map<string, HistoryItem[]>();
+const lastCaughtUpAt = new Map<string, number>();
+const startedAt = Date.now();
 const chats = new Map<string, ChatSummary>();
 const groupNames = new Map<string, string>();
 const lastManualAt = new Map<string, number>();
@@ -57,6 +64,10 @@ function remember(jid: string, item: HistoryItem, isGroup: boolean, chatName: st
   h.push(item);
   if (h.length > HISTORY_LEN) h.shift();
   history.set(jid, h);
+  const a = archive.get(jid) ?? [];
+  a.push(item);
+  if (a.length > ARCHIVE_LEN) a.shift();
+  archive.set(jid, a);
   const prev = chats.get(jid);
   chats.set(jid, {
     jid,
@@ -184,7 +195,7 @@ function scheduleReply(sock: WASocket, jid: string, msg: WAMessage, text: string
   const entry: Pending = p ?? { timer: undefined as unknown as NodeJS.Timeout, texts: [text], last: msg, label, isGroup, senderName };
   entry.timer = setTimeout(() => {
     pending.delete(jid);
-    void respond(sock, jid, entry).catch((e) => log.error(`[ai] ${label}: ${errMsg(e)}`));
+    void respond(sock, jid, entry).catch((e) => log.error(explain('llm', e, `[ai] no reply for ${label}: `)));
   }, DEBOUNCE_MS);
   pending.set(jid, entry);
 }
@@ -267,7 +278,8 @@ export async function handleIncoming(sock: WASocket, msg: WAMessage): Promise<vo
       return;
     }
   } else if (parsed.text) {
-    remember(jid, { fromMe: false, name: senderName, text: parsed.text, ts }, isGroup, chatName);
+    const mentionedMe = isGroup && mentionsMe(parsed.mentioned);
+    remember(jid, { fromMe: false, name: senderName, text: parsed.text, ts, mentionedMe }, isGroup, chatName);
   }
 
   if (!fresh) return;
@@ -295,7 +307,7 @@ export async function handleIncoming(sock: WASocket, msg: WAMessage): Promise<vo
       log.event(`[stt] ${label} said: "${text}"`);
       remember(jid, { fromMe: !self && Boolean(msg.key.fromMe), name: senderName, text, ts }, isGroup, chatName);
     } catch (e) {
-      log.error(`[stt] could not transcribe voice note: ${errMsg(e)}`);
+      log.error(explain('stt', e, '[stt] could not transcribe voice note: '));
       return;
     }
   }
@@ -307,4 +319,56 @@ function trackId() {
   const id = generateMessageID();
   botSentIds.add(id);
   return id;
+}
+
+// ── "Catch me up": summarise what you missed ───────────────────────────
+export interface CatchUpResult {
+  summary: string;
+  chatCount: number;
+  messageCount: number;
+}
+
+/**
+ * Summarise messages from other people that arrived since you last wrote in each chat
+ * (or since the last catch-up), using the local model. Only covers messages received while the app runs.
+ */
+const NL = '\n';
+
+export async function catchUp(opts: { markRead?: boolean } = {}): Promise<CatchUpResult> {
+  const blocks: { name: string; lines: string[]; last: number }[] = [];
+  let messageCount = 0;
+  for (const [jid, items] of archive) {
+    if (isSelfChat(jid)) continue;
+    const since = Math.max(lastManualAt.get(jid) ?? 0, lastCaughtUpAt.get(jid) ?? 0, startedAt - 24 * 3600_000);
+    const fresh = items.filter((i) => !i.fromMe && i.ts > since);
+    if (!fresh.length) continue;
+    const chat = chats.get(jid);
+    const name = chat?.name ?? jid;
+    messageCount += fresh.length;
+    blocks.push({
+      name: chat?.isGroup ? `${name} (group)` : `${name} (direct)`,
+      lines: fresh.map((i) => `${chat?.isGroup ? `${i.name}: ` : ''}${i.text}${i.mentionedMe ? '  [mentions me]' : ''}`),
+      last: fresh.at(-1)?.ts ?? 0,
+    });
+  }
+  if (!blocks.length) return { summary: 'Nothing new since you last checked. 🦥', chatCount: 0, messageCount: 0 };
+
+  // Most recent chats first; trim old lines so the prompt fits a small local model.
+  blocks.sort((a, b) => b.last - a.last);
+  let budget = CATCHUP_MAX_CHARS;
+  const parts: string[] = [];
+  for (const b of blocks) {
+    if (budget <= 200) break;
+    const body = b.lines.join(NL);
+    const clipped = body.length > budget - b.name.length ? body.slice(-(budget - b.name.length - 20)) : body;
+    parts.push(`### ${b.name}${NL}${clipped}`);
+    budget -= clipped.length + b.name.length + 10;
+  }
+  log.info(`[catchup] summarising ${messageCount} message(s) from ${blocks.length} chat(s) with ${state.provider}/${state.model}...`);
+  const summary = await summarizeChats(parts.join(NL + NL));
+  if (opts.markRead !== false) {
+    const now = Date.now();
+    for (const jid of archive.keys()) lastCaughtUpAt.set(jid, now);
+  }
+  return { summary, chatCount: blocks.length, messageCount };
 }

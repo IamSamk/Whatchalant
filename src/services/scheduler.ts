@@ -4,6 +4,8 @@ import type { WASocket } from '@whiskeysockets/baileys';
 import cron, { type ScheduledTask } from 'node-cron';
 import { config } from '../config.js';
 import { errMsg, log } from '../core/log.js';
+import { explain } from '../core/hints.js';
+import { catchUp } from '../core/assistant.js';
 import { dispatcher } from '../core/queue.js';
 import { getSocket, isConnected } from '../core/socket.js';
 
@@ -11,7 +13,8 @@ export interface ScheduledJob {
   id: number;
   jid: string;
   message: string;
-  kind: 'cron' | 'once';
+  /** digest = recurring "Catch me up" summary sent to your own chat. */
+  kind: 'cron' | 'once' | 'digest';
   /** cron expression for "cron", ISO time for "once". */
   when: string;
   createdAt: number;
@@ -33,11 +36,18 @@ async function dispatch(job: ScheduledJob, sock?: WASocket) {
   const s = sock ?? getSocket();
   job.lastRunAt = Date.now();
   log.event(`[scheduler] job #${job.id} firing → ${job.jid}`);
-  await dispatcher.enqueue(s, job.jid, job.message, { label: `scheduled #${job.id} → ${job.jid}` });
+  let text = job.message;
+  if (job.kind === 'digest') {
+    const r = await catchUp();
+    text = r.chatCount
+      ? `🦥 While you were away (${r.messageCount} messages, ${r.chatCount} chats):\n\n${r.summary}`
+      : `🦥 ${r.summary}`;
+  }
+  await dispatcher.enqueue(s, job.jid, text, { label: `scheduled #${job.id} → ${job.jid}` });
 }
 
 function arm(job: ScheduledJob) {
-  if (job.kind === 'cron') {
+  if (job.kind === 'cron' || job.kind === 'digest') {
     const task = cron.schedule(job.when, () => {
       if (!isConnected()) {
         log.warn(`[scheduler] job #${job.id} skipped: WhatsApp not connected`);
@@ -45,7 +55,7 @@ function arm(job: ScheduledJob) {
       }
       void dispatch(job)
         .then(persist)
-        .catch((e) => log.error(`[scheduler] job #${job.id} failed: ${errMsg(e)}`));
+        .catch((e) => log.error(explain('whatsapp', e, `[scheduler] job #${job.id} failed: `)));
     });
     tasks.set(job.id, task);
   }
@@ -62,7 +72,7 @@ function ensureTicker() {
       if (!isConnected()) continue; // wait until we're back online, then send
       jobs.delete(job.id);
       void dispatch(job)
-        .catch((e) => log.error(`[scheduler] job #${job.id} failed: ${errMsg(e)}`))
+        .catch((e) => log.error(explain('whatsapp', e, `[scheduler] job #${job.id} failed: `)))
         .finally(() => void persist());
     }
   }, 15_000);
@@ -79,6 +89,17 @@ export function scheduleMessage(sock: WASocket | null, jid: string, message: str
   arm(job);
   void persist();
   log.info(`[scheduler] job #${job.id} scheduled (${cronExpr}) → ${jid}`);
+  return job;
+}
+
+/** Daily (or any cron) "Catch me up" digest sent to your own "Message yourself" chat. */
+export function scheduleDigest(selfJid: string, cronExpr: string): ScheduledJob {
+  if (!cron.validate(cronExpr)) throw new Error(`invalid cron expression: "${cronExpr}"`);
+  const job: ScheduledJob = { id: nextId++, jid: selfJid, message: '(catch-up digest)', kind: 'digest', when: cronExpr, createdAt: Date.now() };
+  jobs.set(job.id, job);
+  arm(job);
+  void persist();
+  log.info(`[scheduler] job #${job.id}: catch-up digest on "${cronExpr}" → your own chat`);
   return job;
 }
 
@@ -136,7 +157,7 @@ export async function loadJobs() {
     return;
   }
   for (const job of saved) {
-    if (job.kind === 'cron' && !cron.validate(job.when)) continue;
+    if (job.kind !== 'once' && !cron.validate(job.when)) continue;
     jobs.set(job.id, job);
     nextId = Math.max(nextId, job.id + 1);
     arm(job);
